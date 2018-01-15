@@ -1,143 +1,128 @@
 /**
- * Configuration.
+ * Module dependencies.
+ */
+var db = require('then-redis').createClient()
+var fmt = require('util').format;
+
+/**
+ * Redis formats.
  */
 
-var config = {
-  clients: [{
-    clientId: 'application',
-    clientSecret: 'secret'
-  }],
-  confidentialClients: [{
-    clientId: 'confidentialApplication',
-    clientSecret: 'topSecret'
-  }],
-  tokens: [],
-  users: [{
-    id: '123',
-    username: 'pedroetb',
-    password: 'password'
-  }]
+var formats = {
+  client: 'clients:%s',
+  token: 'tokens:%s',
+  user: 'users:%s'
 };
 
 /**
- * Dump the memory storage content (for debug).
+ * Get access token.
  */
 
-var dump = function() {
+module.exports.getAccessToken = function (bearerToken) {
+  return db.hgetall(fmt(formats.token, bearerToken))
+    .then(function (token) {
+      if (!token) {
+        return;
+      }
 
-  console.log('clients', config.clients);
-  console.log('confidentialClients', config.confidentialClients);
-  console.log('tokens', config.tokens);
-  console.log('users', config.users);
-};
-dump()
-/*
- * Methods used by all grant types.
- */
-
-var generateAccessToken = function(bearerToken, callback) {
-console.log("hi?")
-  var tokens = config.tokens.filter(function(token) {
-
-    return token.accessToken === bearerToken;
-  });
-
-  return callback(false, tokens[0]);
-};
-
-var getClient = function(clientId, clientSecret, callback) {
-
-  var clients = config.clients.filter(function(client) {
-
-    return client.clientId === clientId && client.clientSecret === clientSecret;
-  });
-
-  var confidentialClients = config.confidentialClients.filter(function(client) {
-
-    return client.clientId === clientId && client.clientSecret === clientSecret;
-  });
-
-  callback(false, clients[0] || confidentialClients[0]);
-};
-
-var grantTypeAllowed = function(clientId, grantType, callback) {
-
-  var clientsSource,
-    clients = [];
-
-  if (grantType === 'password') {
-    clientsSource = config.clients;
-  } else if (grantType === 'client_credentials') {
-    clientsSource = config.confidentialClients;
-  }
-
-  if (!!clientsSource) {
-    clients = clientsSource.filter(function(client) {
-
-      return client.clientId === clientId;
+      return {
+        user : {
+          accessToken: token.accessToken,
+          clientId: token.clientId,
+          accessTokenExpiresAt: token.expires,
+          userId: token.userId
+        }
+      };
     });
-  }
-
-  callback(false, clients.length);
-};
-
-var saveAccessToken = function(accessToken, clientId, expires, user, callback) {
-
-  config.tokens.push({
-    accessToken: accessToken,
-    expires: expires,
-    clientId: clientId,
-    user: user
-  });
-
-  callback(false);
-};
-
-/*
- * Method used only by password grant type.
- */
-
-var getUser = function(username, password, callback) {
-
-  var users = config.users.filter(function(user) {
-
-    return user.username === username && user.password === password;
-  });
-
-  callback(false, users[0]);
-};
-
-/*
- * Method used only by client_credentials grant type.
- */
-
-var getUserFromClient = function(clientId, clientSecret, callback) {
-
-  var clients = config.confidentialClients.filter(function(client) {
-
-    return client.clientId === clientId && client.clientSecret === clientSecret;
-  });
-
-  var user;
-
-  if (clients.length) {
-    user = {
-      username: clientId
-    };
-  }
-
-  callback(false, user);
 };
 
 /**
- * Export model definition object.
+ * generate Access Token
  */
 
-module.exports = {
-  generateAccessToken: generateAccessToken,
-  getClient: getClient,
-  grantTypeAllowed: grantTypeAllowed,
-  saveAccessToken: saveAccessToken,
-  getUser: getUser,
-  getUserFromClient: getUserFromClient
+var crypto = require('crypto');
+var randomBytes = require('bluebird').promisify(require('crypto').randomBytes);
+
+module.exports.generateAccessToken = function (client, user, scope) {
+  return randomBytes(256).then(function (buffer) {
+    return crypto
+      .createHash('sha1')
+      .update(buffer)
+      .digest('hex');
+  });
+};
+
+/**
+ * Get client.
+ */
+
+module.exports.getClient = function (clientId, clientSecret) {
+  return db.hgetall(fmt(formats.client, clientId))
+    .then(function (client) {
+      if (!client || client.clientSecret !== clientSecret) {
+        return;
+      }
+
+      return {
+        clientId: client.clientId,
+        clientSecret: client.clientSecret
+      };
+    });
+};
+
+/**
+ * Get refresh token.
+ */
+
+module.exports.getRefreshToken = function (bearerToken) {
+  return db.hgetall(fmt(formats.token, bearerToken))
+    .then(function (token) {
+      if (!token) {
+        return;
+      }
+
+      return {
+        clientId: token.clientId,
+        expires: token.refreshTokenExpiresOn,
+        refreshToken: token.accessToken,
+        userId: token.userId
+      };
+    });
+};
+
+/**
+ * Get user.
+ */
+
+module.exports.getUser = function (username, password) {
+  return db.hgetall(fmt(formats.user, username))
+    .then(function (user) {
+      if (!user || password !== user.password) {
+        return;
+      }
+
+      return {
+        id: username
+      };
+    });
+};
+
+/**
+ * Save token.
+ */
+
+module.exports.saveToken = function (token, client, user) {
+  var data = {
+    accessToken: token.accessToken,
+    accessTokenExpiresAt: token.accessTokenExpiresAt,
+    clientId: client.id,
+    refreshToken: token.refreshToken,
+    refreshTokenExpiresAt: token.refreshTokenExpiresAt,
+    userId: user.id
+  };
+
+  return Promise.all([
+    db.hmset(fmt(formats.token, token.accessToken), data),
+    db.hmset(fmt(formats.token, token.refreshToken), data)
+  ]).return(data);
 };
